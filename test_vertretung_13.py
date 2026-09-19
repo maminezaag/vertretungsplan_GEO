@@ -58,9 +58,12 @@ def nettoyer_cellule(fragment_html: str) -> str:
     return unescape(texte).strip()
 
 
+JOURS_SEMAINE = r"Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag"
+
+
 def extraire_date_plan(page_html: str) -> str:
     texte = nettoyer_cellule(page_html)
-    m = re.search(r"\d{1,2}\.\d{1,2}\.\d{4}\s+\w+", texte)
+    m = re.search(rf"\d{{1,2}}\.\d{{1,2}}\.\d{{4}}\s+(?:{JOURS_SEMAINE})", texte)
     return m.group(0) if m else "date inconnue"
 
 
