@@ -147,28 +147,34 @@ def formater_entrees(entrees, date_plan: str, url: str) -> str:
 
 # --- Logique principale (TEST — pas de contrainte d'heure) -----------------
 
-def verifier_page(url: str, libelle: str, etat: dict, deja_signalees: set) -> list:
-    """Récupère une page, en extrait les entrées Entfall pour CLASSE_CIBLE,
-    renvoie la liste des entrées NOUVELLES (pas encore signalées)."""
+def analyser_page(url: str, libelle: str) -> tuple:
+    """Récupère une page et renvoie (libelle, date_plan, url, entrees)."""
     try:
         page_html = recuperer_page(url)
     except Exception as e:
         print(f"[ERREUR] Impossible de récupérer {url} : {e}")
-        return []
+        return (libelle, "date inconnue", url, [])
 
     date_plan = extraire_date_plan(page_html)
     entrees = extraire_entrees_entfall(page_html, date_plan)
     print(f"{libelle} ({date_plan}) : {len(entrees)} entrée(s) 'Entfall' pour la classe {CLASSE_CIBLE}.")
+    return (libelle, date_plan, url, entrees)
 
-    nouvelles = [e for e in entrees if e["cle"] not in deja_signalees]
-    if nouvelles:
-        corps = formater_entrees(nouvelles, date_plan, url)
-        envoyer_email(f"Vertretungsplan {CLASSE_CIBLE} — {libelle} ({date_plan})", corps)
-        print(f"  -> Email de test envoyé ({len(nouvelles)} nouvelle(s) entrée(s)).")
-    else:
-        print("  -> Rien de nouveau (ou aucune entrée trouvée).")
 
-    return [e["cle"] for e in entrees]
+def formater_email_combine(sections) -> str:
+    """sections : liste de (libelle, date_plan, url, entrees_nouvelles).
+    Construit un seul corps d'email avec une section par page."""
+    blocs = []
+    for libelle, date_plan, url, nouvelles in sections:
+        lignes = [f"--- {libelle.upper()} ({date_plan}) — classe {CLASSE_CIBLE} ---"]
+        for e in nouvelles:
+            ligne = f"- Heure {e['stunde']} : {e['fach'] or '(matière ?)'} — Entfall"
+            if e["remarque"]:
+                ligne += f" ({e['remarque']})"
+            lignes.append(ligne)
+        lignes.append(f"Source : {url}")
+        blocs.append("\n".join(lignes))
+    return "\n\n".join(blocs)
 
 
 def main():
@@ -176,10 +182,28 @@ def main():
     etat = lire_etat()
     deja_signalees = set(etat.get("signaled", []))
 
-    cles_aujourdhui = verifier_page(URL_AUJOURDHUI, "aujourd'hui", etat, deja_signalees)
-    cles_demain = verifier_page(URL_DEMAIN, "demain", etat, deja_signalees)
+    resultats = [
+        analyser_page(URL_AUJOURDHUI, "aujourd'hui"),
+        analyser_page(URL_DEMAIN, "demain"),
+    ]
 
-    etat["signaled"] = list(deja_signalees | set(cles_aujourdhui) | set(cles_demain))
+    # Pour chaque page, on ne garde que les entrées pas encore signalées
+    sections_avec_nouveautes = []
+    toutes_les_cles = set()
+    for libelle, date_plan, url, entrees in resultats:
+        toutes_les_cles |= {e["cle"] for e in entrees}
+        nouvelles = [e for e in entrees if e["cle"] not in deja_signalees]
+        if nouvelles:
+            sections_avec_nouveautes.append((libelle, date_plan, url, nouvelles))
+
+    if sections_avec_nouveautes:
+        corps = formater_email_combine(sections_avec_nouveautes)
+        envoyer_email(f"Vertretungsplan {CLASSE_CIBLE} — nouveautés", corps)
+        print(f"-> UN SEUL email de test envoyé ({len(sections_avec_nouveautes)} section(s)).")
+    else:
+        print("-> Rien de nouveau, aucun email envoyé.")
+
+    etat["signaled"] = list(deja_signalees | toutes_les_cles)
     ecrire_etat(etat)
     print("=== Fin du test ===")
 
