@@ -134,17 +134,6 @@ def envoyer_email(sujet: str, corps: str):
         serveur.send_message(msg)
 
 
-def formater_entrees(entrees, date_plan: str, url: str) -> str:
-    lignes = [f"[TEST] Plan du {date_plan} — classe {CLASSE_CIBLE}\n"]
-    for e in entrees:
-        ligne = f"- Heure {e['stunde']} : {e['fach'] or '(matière ?)'} — Entfall"
-        if e["remarque"]:
-            ligne += f" ({e['remarque']})"
-        lignes.append(ligne)
-    lignes.append(f"\nSource : {url}")
-    return "\n".join(lignes)
-
-
 # --- Logique principale (TEST — pas de contrainte d'heure) -----------------
 
 def analyser_page(url: str, libelle: str) -> tuple:
@@ -163,16 +152,16 @@ def analyser_page(url: str, libelle: str) -> tuple:
 
 def formater_email_combine(sections) -> str:
     """sections : liste de (libelle, date_plan, url, entrees_nouvelles).
-    Construit un seul corps d'email avec une section par page."""
+    Construit un seul corps d'email (en ALLEMAND) avec une section par page."""
     blocs = []
     for libelle, date_plan, url, nouvelles in sections:
-        lignes = [f"--- {libelle.upper()} ({date_plan}) — classe {CLASSE_CIBLE} ---"]
+        lignes = [f"--- {libelle.upper()} ({date_plan}) — Klasse {CLASSE_CIBLE} ---"]
         for e in nouvelles:
-            ligne = f"- Heure {e['stunde']} : {e['fach'] or '(matière ?)'} — Entfall"
+            ligne = f"- Stunde {e['stunde']}: {e['fach'] or '(Fach unbekannt)'} — Entfall"
             if e["remarque"]:
                 ligne += f" ({e['remarque']})"
             lignes.append(ligne)
-        lignes.append(f"Source : {url}")
+        lignes.append(f"Quelle: {url}")
         blocs.append("\n".join(lignes))
     return "\n\n".join(blocs)
 
@@ -183,8 +172,8 @@ def main():
     deja_signalees = set(etat.get("signaled", []))
 
     resultats = [
-        analyser_page(URL_AUJOURDHUI, "aujourd'hui"),
-        analyser_page(URL_DEMAIN, "demain"),
+        analyser_page(URL_AUJOURDHUI, "heute"),
+        analyser_page(URL_DEMAIN, "morgen"),
     ]
 
     # Pour chaque page, on ne garde que les entrées pas encore signalées
@@ -198,7 +187,7 @@ def main():
 
     if sections_avec_nouveautes:
         corps = formater_email_combine(sections_avec_nouveautes)
-        envoyer_email(f"Vertretungsplan {CLASSE_CIBLE} — nouveautés", corps)
+        envoyer_email(f"Vertretungsplan Klasse {CLASSE_CIBLE} — Neuigkeiten", corps)
         print(f"-> UN SEUL email de test envoyé ({len(sections_avec_nouveautes)} section(s)).")
     else:
         print("-> Rien de nouveau, aucun email envoyé.")
