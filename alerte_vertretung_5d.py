@@ -74,7 +74,7 @@ def extraire_date_plan(page_html: str) -> str:
     return m.group(0) if m else "date inconnue"
 
 
-def extraire_entrees_entfall(page_html: str, classe: str = CLASSE_CIBLE):
+def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASSE_CIBLE):
     """Renvoie la liste des entrées 'Entfall' pour la classe donnée.
 
     Pas de bibliothèque externe : on repère les lignes <tr>...</tr> et
@@ -109,7 +109,9 @@ def extraire_entrees_entfall(page_html: str, classe: str = CLASSE_CIBLE):
             continue
 
         fach = fach_old or fach_new
-        cle = f"{stunde}|{klasse}|{fach}|{art}"
+        # La date fait partie de la clé : une même combinaison heure/classe/
+        # matière un autre jour ne sera jamais confondue avec celle d'aujourd'hui.
+        cle = f"{date_plan}|{stunde}|{klasse}|{fach}|{art}"
         entrees.append(
             {
                 "cle": cle,
@@ -197,7 +199,7 @@ def main():
             return  # on retentera au prochain passage (toujours dans l'heure 20h)
 
         date_plan = extraire_date_plan(page_html)
-        entrees = extraire_entrees_entfall(page_html)
+        entrees = extraire_entrees_entfall(page_html, date_plan)
         print(f"20h — {len(entrees)} entrée(s) 'Entfall' trouvée(s) pour {CLASSE_CIBLE} ({date_plan}).")
 
         if entrees:
@@ -227,7 +229,7 @@ def main():
             return
 
         date_plan = extraire_date_plan(page_html)
-        entrees = extraire_entrees_entfall(page_html)
+        entrees = extraire_entrees_entfall(page_html, date_plan)
         print(f"7h — {len(entrees)} entrée(s) 'Entfall' trouvée(s) pour {CLASSE_CIBLE} ({date_plan}).")
 
         if entrees:
@@ -250,7 +252,7 @@ def main():
             return
 
         date_plan = extraire_date_plan(page_html)
-        entrees = extraire_entrees_entfall(page_html)
+        entrees = extraire_entrees_entfall(page_html, date_plan)
         deja_signalees = set(etat.get("signaled", []))
         nouvelles = [e for e in entrees if e["cle"] not in deja_signalees]
 
@@ -271,4 +273,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
