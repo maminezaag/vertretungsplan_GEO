@@ -28,13 +28,13 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
-        run: python alerte_vertretung_5d.py
+        run: python test_vertretung_13.py
 
       - name: Sauvegarder l'état
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A -- etat_vertretung_5d.json || true
+          git add -A -- etat_TEST_13.json || true
           git diff --staged --quiet || git commit -m "Mise à jour état Vertretungsplan 5d"
           git push
 
