@@ -67,10 +67,19 @@ def nettoyer_cellule(fragment_html: str) -> str:
     return unescape(texte).strip()
 
 
+JOURS_SEMAINE = r"Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag"
+
+
 def extraire_date_plan(page_html: str) -> str:
-    """Extrait la date affichée sur la page (ex : '18.9.2026 Freitag')."""
+    """Extrait la date du PLAN affichée sur la page (ex : '18.9.2026 Freitag').
+
+    Le mot suivant la date DOIT être un jour de la semaine allemand, pour
+    ne pas confondre avec la date "gültig ab ..." (validité générale du
+    plan) qui apparaît plus haut sur la page et n'est pas suivie d'un jour
+    de la semaine.
+    """
     texte = nettoyer_cellule(page_html)
-    m = re.search(r"\d{1,2}\.\d{1,2}\.\d{4}\s+\w+", texte)
+    m = re.search(rf"\d{{1,2}}\.\d{{1,2}}\.\d{{4}}\s+(?:{JOURS_SEMAINE})", texte)
     return m.group(0) if m else "date inconnue"
 
 
@@ -159,13 +168,14 @@ def envoyer_email(sujet: str, corps: str):
 
 
 def formater_entrees(entrees, date_plan: str, url: str) -> str:
-    lignes = [f"Plan du {date_plan} — classe {CLASSE_CIBLE}\n"]
+    """Corps de l'email — en ALLEMAND (langue des destinataires)."""
+    lignes = [f"Vertretungsplan vom {date_plan} — Klasse {CLASSE_CIBLE}\n"]
     for e in entrees:
-        ligne = f"- Heure {e['stunde']} : {e['fach'] or '(matière ?)'} — Entfall"
+        ligne = f"- Stunde {e['stunde']}: {e['fach'] or '(Fach unbekannt)'} — Entfall"
         if e["remarque"]:
             ligne += f" ({e['remarque']})"
         lignes.append(ligne)
-    lignes.append(f"\nSource : {url}")
+    lignes.append(f"\nQuelle: {url}")
     return "\n".join(lignes)
 
 
@@ -204,7 +214,7 @@ def main():
 
         if entrees:
             corps = formater_entrees(entrees, date_plan, URL_DEMAIN)
-            envoyer_email(f"Vertretungsplan {CLASSE_CIBLE} — Entfall demain ({date_plan})", corps)
+            envoyer_email(f"Vertretungsplan Klasse {CLASSE_CIBLE} — Entfall morgen ({date_plan})", corps)
             print("Email envoyé (soir).")
 
         ecrire_etat(
@@ -234,7 +244,7 @@ def main():
 
         if entrees:
             corps = formater_entrees(entrees, date_plan, URL_AUJOURDHUI)
-            envoyer_email(f"Vertretungsplan {CLASSE_CIBLE} — Entfall aujourd'hui ({date_plan})", corps)
+            envoyer_email(f"Vertretungsplan Klasse {CLASSE_CIBLE} — Entfall heute ({date_plan})", corps)
             print("Email envoyé (matin).")
 
         etat["date_cible"] = date_plan
@@ -258,7 +268,7 @@ def main():
 
         if nouvelles:
             corps = formater_entrees(nouvelles, date_plan, URL_AUJOURDHUI)
-            envoyer_email(f"Vertretungsplan {CLASSE_CIBLE} — nouvelle entrée Entfall ({date_plan})", corps)
+            envoyer_email(f"Vertretungsplan Klasse {CLASSE_CIBLE} — neuer Entfall ({date_plan})", corps)
             print(f"Journée — {len(nouvelles)} nouvelle(s) entrée(s), email envoyé.")
         else:
             print("Journée — aucune nouvelle entrée.")
