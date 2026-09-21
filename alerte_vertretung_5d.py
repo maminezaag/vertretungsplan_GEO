@@ -41,6 +41,16 @@ URL_DEMAIN = "https://vertretungsplan.gymnasium-eversten.de/oeffentlich/subst_00
 CLASSE_CIBLE = "5d"
 ART_CIBLE = "entfall"  # comparaison insensible à la casse
 
+# Correspondance numéro de "Stunde" -> horaire réel, pour affichage dans l'email.
+STUNDEN_ZEITEN = {
+    "1": "07:50–08:35",
+    "2": "08:40–09:25",
+    "3": "09:45–10:30",
+    "4": "10:35–11:20",
+    "5": "11:40–12:25",
+    "6": "12:30–13:15",
+}
+
 EMAIL_EXPEDITEUR = os.environ["GMAIL_ADDRESS"]
 EMAIL_MOT_DE_PASSE = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_DESTINATAIRE = os.environ["GMAIL_TO"]
@@ -171,7 +181,9 @@ def formater_entrees(entrees, date_plan: str, url: str) -> str:
     """Corps de l'email — en ALLEMAND (langue des destinataires)."""
     lignes = [f"Vertretungsplan vom {date_plan} — Klasse {CLASSE_CIBLE}\n"]
     for e in entrees:
-        ligne = f"- Stunde {e['stunde']}: {e['fach'] or '(Fach unbekannt)'} — Entfall"
+        zeit = STUNDEN_ZEITEN.get(e["stunde"].strip())
+        stunde_label = f"Stunde {e['stunde']} ({zeit})" if zeit else f"Stunde {e['stunde']}"
+        ligne = f"- {stunde_label}: {e['fach'] or '(Fach unbekannt)'} — Entfall"
         if e["remarque"]:
             ligne += f" ({e['remarque']})"
         lignes.append(ligne)
