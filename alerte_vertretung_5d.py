@@ -2,23 +2,31 @@
 Surveillance du plan de remplacement (Vertretungsplan) du Gymnasium Eversten
 pour la classe 5d — alerte par email en cas d'heure "Entfall" (cours annulé).
 
-Fonctionnement (simplifié) :
-  - Le script ne gère plus lui-même les horaires : c'est le planificateur
-    externe (cron configuré via crontab.org, dans le workflow GitHub
-    Actions) qui décide QUAND l'appeler.
-  - À CHAQUE exécution, le script :
-      1. Nettoie le fichier d'état : ne conserve que les entrées
-         correspondant à AUJOURD'HUI et à DEMAIN (toute entrée plus
-         ancienne, ex. de la veille, est supprimée).
-      2. Relit la page du jour (subst_001.htm) ET la page du lendemain
-         (subst_002.htm).
-      3. Compare les entrées "Entfall" trouvées pour la 5d à celles déjà
-         signalées dans le fichier d'état.
-      4. S'il y a du NOUVEAU (par rapport à l'état précédent) : envoie un
-         email avec uniquement les nouvelles entrées, et met à jour l'état.
-      5. S'il n'y a rien de nouveau : aucun email n'est envoyé, mais
-         l'état est quand même réécrit (pour refléter le nettoyage /
-         la date courante).
+Fonctionnement :
+  - Le script ne gère plus lui-même les horaires : c'est un planificateur
+    externe (crontab.org) qui décide QUAND l'appeler, ET qui indique QUOI
+    faire via une variable d'environnement MODE (transmise depuis le
+    client_payload d'un repository_dispatch GitHub — voir le .yml).
+
+  - MODE=soir (prévu ~20h00) :
+      Lit la page de DEMAIN (subst_002.htm) et envoie TOUJOURS un email
+      complet avec toutes les entrées "Entfall" trouvées pour la 5d.
+
+  - MODE=matin (prévu ~07h15) :
+      Lit la page d'AUJOURD'HUI (subst_001.htm) et envoie TOUJOURS un email
+      complet (même si les mêmes entrées ont déjà été envoyées la veille
+      à 20h — c'est voulu, cela sert de rappel). Sert aussi de nouvelle
+      "baseline" pour les vérifications différentielles qui suivent dans
+      la journée.
+
+  - MODE=journee (prévu entre ~08h00 et ~12h00, plusieurs appels) :
+      Relit la page d'AUJOURD'HUI et envoie un email UNIQUEMENT si une
+      entrée nouvelle (absente de la baseline précédente) est détectée.
+      Si rien de nouveau, aucun email n'est envoyé.
+
+  - Nettoyage automatique : à chaque exécution, quel que soit le mode, les
+    entrées d'état antérieures à aujourd'hui sont supprimées (on ne garde
+    que "aujourd'hui" et "demain").
 """
 
 import os
@@ -191,11 +199,13 @@ def formater_entrees(entrees, date_plan: str, url: str) -> str:
     return "\n".join(lignes)
 
 
-# --- Traitement d'une page (aujourd'hui OU demain) --------------------------
-
-def traiter_page(url: str, date_iso: str, signaled: dict, libelle_sujet: str) -> bool:
-    """Récupère la page, envoie un email s'il y a de nouvelles entrées
-    'Entfall', et met à jour `signaled[date_iso]` en place.
+def traiter_page(url: str, date_iso: str, signaled: dict, libelle_sujet: str, forcer_envoi: bool = False) -> bool:
+    """Récupère la page, met à jour `signaled[date_iso]` en place, et envoie
+    un email selon le mode :
+      - forcer_envoi=True  : envoie TOUJOURS un mail complet avec toutes les
+        entrées "Entfall" trouvées (utilisé pour les modes "soir" et "matin").
+      - forcer_envoi=False : envoie uniquement les entrées NOUVELLES par
+        rapport à l'état déjà enregistré (utilisé pour le mode "journee").
 
     Renvoie True si un email a été envoyé.
     """
@@ -208,27 +218,32 @@ def traiter_page(url: str, date_iso: str, signaled: dict, libelle_sujet: str) ->
     date_plan = extraire_date_plan(page_html)
     entrees = extraire_entrees_entfall(page_html, date_plan)
     deja_signalees = set(signaled.get(date_iso, []))
-    nouvelles = [e for e in entrees if e["cle"] not in deja_signalees]
+
+    if forcer_envoi:
+        a_envoyer = entrees
+    else:
+        a_envoyer = [e for e in entrees if e["cle"] not in deja_signalees]
 
     print(
         f"{date_iso} ({url.rsplit('/', 1)[-1]}) — "
-        f"{len(entrees)} entrée(s) 'Entfall' au total, {len(nouvelles)} nouvelle(s)."
+        f"{len(entrees)} entrée(s) 'Entfall' au total, {len(a_envoyer)} à envoyer "
+        f"({'envoi forcé' if forcer_envoi else 'diff uniquement'})."
     )
 
     email_envoye = False
-    if nouvelles:
-        corps = formater_entrees(nouvelles, date_plan, url)
+    if a_envoyer:
+        corps = formater_entrees(a_envoyer, date_plan, url)
         envoyer_email(
             f"Vertretungsplan Klasse {CLASSE_CIBLE} — Entfall {libelle_sujet} ({date_plan})",
             corps,
         )
         print("Email envoyé.")
         email_envoye = True
+    else:
+        print("Rien à envoyer.")
 
-    # On garde toutes les entrées actuellement présentes sur la page,
-    # plus celles déjà signalées auparavant (au cas où une entrée aurait
-    # temporairement disparu de la page puis reviendrait, elle ne serait
-    # pas re-signalée inutilement).
+    # On garde toutes les entrées actuellement présentes sur la page, plus
+    # celles déjà signalées auparavant (baseline pour les diffs suivants).
     signaled[date_iso] = sorted(deja_signalees | {e["cle"] for e in entrees})
     return email_envoye
 
@@ -252,9 +267,32 @@ def main():
     if supprimees:
         print(f"Nettoyage — entrées supprimées pour : {', '.join(supprimees)}")
 
-    # --- Vérification des deux pages ---
-    traiter_page(URL_AUJOURDHUI, today_iso, signaled, "heute")
-    traiter_page(URL_DEMAIN, tomorrow_iso, signaled, "morgen")
+    # --- Mode d'exécution, fourni par l'appel externe (crontab.org) ---
+    # Le mode est transmis via la variable d'environnement MODE, elle-même
+    # positionnée dans le workflow depuis github.event.client_payload.mode
+    # (voir le fichier .yml). Aucune décision n'est prise ici en fonction
+    # de l'heure système.
+    mode = os.environ.get("MODE", "").strip().lower()
+
+    if mode == "soir":
+        # 20h00 : info complète sur DEMAIN, toujours envoyée.
+        traiter_page(URL_DEMAIN, tomorrow_iso, signaled, "morgen", forcer_envoi=True)
+    elif mode == "matin":
+        # 07h15 : info complète sur AUJOURD'HUI, toujours renvoyée
+        # (même si déjà envoyée la veille à 20h).
+        traiter_page(URL_AUJOURDHUI, today_iso, signaled, "heute", forcer_envoi=True)
+    elif mode == "journee":
+        # 08h00-12h00 : uniquement les nouveautés par rapport à l'état
+        # laissé par le passage de 07h15 (ou par un passage "journee"
+        # précédent dans la même journée).
+        traiter_page(URL_AUJOURDHUI, today_iso, signaled, "heute", forcer_envoi=False)
+    else:
+        print(
+            f"[ERREUR] MODE inconnu ou absent : '{mode}'. "
+            "Valeurs attendues : 'soir', 'matin' ou 'journee' "
+            "(à transmettre via client_payload.mode depuis crontab.org)."
+        )
+        return
 
     # --- Sauvegarde de l'état (dans tous les cas, même sans nouveauté) ---
     etat["signaled"] = signaled
