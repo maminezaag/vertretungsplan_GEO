@@ -2,11 +2,22 @@ name: Alerte Vertretungsplan 5d
 
 on:
   # Aucun déclenchement automatique côté GitHub : c'est crontab.org qui
-  # appelle ce workflow via l'API GitHub (voir plus bas comment configurer
-  # la tâche cron sur crontab.org).
+  # appelle ce workflow via l'API GitHub, en indiquant le mode d'exécution
+  # dans client_payload.mode (voir les instructions données à côté).
   repository_dispatch:
     types: [verifier-plan]
   workflow_dispatch:
+    # Pour pouvoir tester manuellement depuis l'interface GitHub, avec un
+    # mode choisi dans une liste.
+    inputs:
+      mode:
+        description: "Mode d'exécution"
+        required: true
+        type: choice
+        options:
+          - soir
+          - matin
+          - journee
 
 permissions:
   contents: write
@@ -31,6 +42,7 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
+          MODE: ${{ github.event.client_payload.mode || github.event.inputs.mode }}
         run: python alerte_vertretung_5d.py
 
       - name: Sauvegarder l'état
