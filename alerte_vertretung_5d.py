@@ -2,22 +2,23 @@
 Surveillance du plan de remplacement (Vertretungsplan) du Gymnasium Eversten
 pour la classe 5d — alerte par email en cas d'heure "Entfall" (cours annulé).
 
-Cycle quotidien (heure de Berlin) :
-  - 20h00 : lit la page du LENDEMAIN (subst_002.htm), envoie un email
-            complet avec toutes les heures "Entfall" trouvées pour la 5d.
-  - 07h00 : relit la page du jour même (subst_001.htm) et renvoie un email
-            complet (le contenu peut répéter celui de 20h, c'est voulu).
-  - 08h00 à 15h30 : vérifie régulièrement la page du jour, envoie un email
-            UNIQUEMENT si une nouvelle entrée (non signalée auparavant)
-            apparaît.
-  - 15h30 : arrête le cycle et supprime le fichier d'état
-            (la prochaine action utile aura lieu à 20h00).
-
-Le script est conçu pour être appelé fréquemment (ex. toutes les 10 min)
-par un planificateur externe (GitHub Actions) ; c'est LUI qui décide, en
-fonction de l'heure de Berlin, ce qu'il doit faire à chaque appel. Cela
-évite les soucis liés au changement d'heure été/hiver (le cron de GitHub
-Actions est toujours en UTC).
+Fonctionnement (simplifié) :
+  - Le script ne gère plus lui-même les horaires : c'est le planificateur
+    externe (cron configuré via crontab.org, dans le workflow GitHub
+    Actions) qui décide QUAND l'appeler.
+  - À CHAQUE exécution, le script :
+      1. Nettoie le fichier d'état : ne conserve que les entrées
+         correspondant à AUJOURD'HUI et à DEMAIN (toute entrée plus
+         ancienne, ex. de la veille, est supprimée).
+      2. Relit la page du jour (subst_001.htm) ET la page du lendemain
+         (subst_002.htm).
+      3. Compare les entrées "Entfall" trouvées pour la 5d à celles déjà
+         signalées dans le fichier d'état.
+      4. S'il y a du NOUVEAU (par rapport à l'état précédent) : envoie un
+         email avec uniquement les nouvelles entrées, et met à jour l'état.
+      5. S'il n'y a rien de nouveau : aucun email n'est envoyé, mais
+         l'état est quand même réécrit (pour refléter le nettoyage /
+         la date courante).
 """
 
 import os
@@ -27,7 +28,7 @@ import smtplib
 from email.mime.text import MIMEText
 from html import unescape
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -61,8 +62,7 @@ def recuperer_page(url: str) -> str:
 
 def nettoyer_cellule(fragment_html: str) -> str:
     """Enlève les balises HTML restantes et décode les caractères
-    spéciaux (ex : &amp; -> &) d'un morceau de HTML, comme le faisait
-    déjà `re.search` sur du texte brut dans l'ancien script."""
+    spéciaux (ex : &amp; -> &) d'un morceau de HTML."""
     texte = re.sub(r"<[^>]+>", "", fragment_html)
     return unescape(texte).strip()
 
@@ -75,8 +75,7 @@ def extraire_date_plan(page_html: str) -> str:
 
     Le mot suivant la date DOIT être un jour de la semaine allemand, pour
     ne pas confondre avec la date "gültig ab ..." (validité générale du
-    plan) qui apparaît plus haut sur la page et n'est pas suivie d'un jour
-    de la semaine.
+    plan) qui apparaît plus haut sur la page.
     """
     texte = nettoyer_cellule(page_html)
     m = re.search(rf"\d{{1,2}}\.\d{{1,2}}\.\d{{4}}\s+(?:{JOURS_SEMAINE})", texte)
@@ -86,13 +85,8 @@ def extraire_date_plan(page_html: str) -> str:
 def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASSE_CIBLE):
     """Renvoie la liste des entrées 'Entfall' pour la classe donnée.
 
-    Pas de bibliothèque externe : on repère les lignes <tr>...</tr> et
-    les cellules <td>...</td> avec de simples expressions régulières,
-    exactement dans le même esprit que le `re.search` de l'ancien
-    script (juste appliqué à plusieurs cellules au lieu d'une seule).
-
     Chaque entrée est un dict avec une clé unique 'cle' utilisée pour la
-    déduplication (heure + classe + matière + type).
+    déduplication (date + heure + classe + matière + type).
     """
     entrees = []
     lignes = re.findall(r"<tr[^>]*>(.*?)</tr>", page_html, re.S | re.I)
@@ -118,8 +112,6 @@ def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASS
             continue
 
         fach = fach_old or fach_new
-        # La date fait partie de la clé : une même combinaison heure/classe/
-        # matière un autre jour ne sera jamais confondue avec celle d'aujourd'hui.
         cle = f"{date_plan}|{stunde}|{klasse}|{fach}|{art}"
         entrees.append(
             {
@@ -136,6 +128,19 @@ def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASS
 
 
 # --- État persistant ---------------------------------------------------------
+#
+# Structure du fichier d'état :
+# {
+#   "signaled": {
+#       "2026-09-21": ["cle1", "cle2", ...],   # entrées déjà signalées pour AUJOURD'HUI
+#       "2026-09-22": ["cle3", ...]            # entrées déjà signalées pour DEMAIN
+#   }
+# }
+#
+# Les clés du dict "signaled" sont des dates ISO (année-mois-jour) calculées
+# à partir de la date d'exécution du script (pas du texte de la page), ce qui
+# permet un nettoyage simple : à chaque exécution, on ne garde que les clés
+# correspondant à aujourd'hui et à demain.
 
 def lire_etat() -> dict:
     if FICHIER_ETAT.exists():
@@ -148,11 +153,6 @@ def lire_etat() -> dict:
 
 def ecrire_etat(etat: dict):
     FICHIER_ETAT.write_text(json.dumps(etat, ensure_ascii=False, indent=2))
-
-
-def supprimer_etat():
-    if FICHIER_ETAT.exists():
-        FICHIER_ETAT.unlink()
 
 
 # --- Email ---------------------------------------------------------------
@@ -179,106 +179,74 @@ def formater_entrees(entrees, date_plan: str, url: str) -> str:
     return "\n".join(lignes)
 
 
+# --- Traitement d'une page (aujourd'hui OU demain) --------------------------
+
+def traiter_page(url: str, date_iso: str, signaled: dict, libelle_sujet: str) -> bool:
+    """Récupère la page, envoie un email s'il y a de nouvelles entrées
+    'Entfall', et met à jour `signaled[date_iso]` en place.
+
+    Renvoie True si un email a été envoyé.
+    """
+    try:
+        page_html = recuperer_page(url)
+    except Exception as e:
+        print(f"[ERREUR] Impossible de récupérer {url} : {e}")
+        return False
+
+    date_plan = extraire_date_plan(page_html)
+    entrees = extraire_entrees_entfall(page_html, date_plan)
+    deja_signalees = set(signaled.get(date_iso, []))
+    nouvelles = [e for e in entrees if e["cle"] not in deja_signalees]
+
+    print(
+        f"{date_iso} ({url.rsplit('/', 1)[-1]}) — "
+        f"{len(entrees)} entrée(s) 'Entfall' au total, {len(nouvelles)} nouvelle(s)."
+    )
+
+    email_envoye = False
+    if nouvelles:
+        corps = formater_entrees(nouvelles, date_plan, url)
+        envoyer_email(
+            f"Vertretungsplan Klasse {CLASSE_CIBLE} — Entfall {libelle_sujet} ({date_plan})",
+            corps,
+        )
+        print("Email envoyé.")
+        email_envoye = True
+
+    # On garde toutes les entrées actuellement présentes sur la page,
+    # plus celles déjà signalées auparavant (au cas où une entrée aurait
+    # temporairement disparu de la page puis reviendrait, elle ne serait
+    # pas re-signalée inutilement).
+    signaled[date_iso] = sorted(deja_signalees | {e["cle"] for e in entrees})
+    return email_envoye
+
+
 # --- Logique principale -------------------------------------------------
 
 def main():
     maintenant = datetime.now(TZ_BERLIN)
-    heure, minute = maintenant.hour, maintenant.minute
-    aujourdhui = maintenant.date().isoformat()
+    aujourdhui = maintenant.date()
+    demain = aujourdhui + timedelta(days=1)
+    today_iso = aujourdhui.isoformat()
+    tomorrow_iso = demain.isoformat()
 
     etat = lire_etat()
+    signaled = etat.get("signaled", {})
 
-    # --- 15h30 à 15h59 : arrêt du cycle, on efface l'état ---
-    if heure == 15 and minute >= 30:
-        if FICHIER_ETAT.exists():
-            supprimer_etat()
-            print("15h30 — arrêt du cycle journalier, fichier d'état supprimé.")
-        else:
-            print("15h30 — rien à faire (fichier d'état déjà absent).")
-        return
+    # --- Nettoyage : on ne garde que les entrées d'aujourd'hui et de demain ---
+    supprimees = [d for d in signaled if d not in (today_iso, tomorrow_iso)]
+    for d in supprimees:
+        del signaled[d]
+    if supprimees:
+        print(f"Nettoyage — entrées supprimées pour : {', '.join(supprimees)}")
 
-    # --- 20h00 à 20h59 : lecture du plan du LENDEMAIN ---
-    if heure == 20:
-        if etat.get("dernier_envoi_soir") == aujourdhui:
-            print("20h — déjà exécuté aujourd'hui, on ignore.")
-            return
-        try:
-            page_html = recuperer_page(URL_DEMAIN)
-        except Exception as e:
-            print(f"[ERREUR] Impossible de récupérer {URL_DEMAIN} : {e}")
-            return  # on retentera au prochain passage (toujours dans l'heure 20h)
+    # --- Vérification des deux pages ---
+    traiter_page(URL_AUJOURDHUI, today_iso, signaled, "heute")
+    traiter_page(URL_DEMAIN, tomorrow_iso, signaled, "morgen")
 
-        date_plan = extraire_date_plan(page_html)
-        entrees = extraire_entrees_entfall(page_html, date_plan)
-        print(f"20h — {len(entrees)} entrée(s) 'Entfall' trouvée(s) pour {CLASSE_CIBLE} ({date_plan}).")
-
-        if entrees:
-            corps = formater_entrees(entrees, date_plan, URL_DEMAIN)
-            envoyer_email(f"Vertretungsplan Klasse {CLASSE_CIBLE} — Entfall morgen ({date_plan})", corps)
-            print("Email envoyé (soir).")
-
-        ecrire_etat(
-            {
-                "date_cible": date_plan,
-                "signaled": [e["cle"] for e in entrees],
-                "dernier_envoi_soir": aujourdhui,
-                "dernier_envoi_matin": etat.get("dernier_envoi_matin"),
-            }
-        )
-        return
-
-    # --- 07h00 à 07h59 : relecture complète du plan du JOUR ---
-    if heure == 7:
-        if etat.get("dernier_envoi_matin") == aujourdhui:
-            print("7h — déjà exécuté aujourd'hui, on ignore.")
-            return
-        try:
-            page_html = recuperer_page(URL_AUJOURDHUI)
-        except Exception as e:
-            print(f"[ERREUR] Impossible de récupérer {URL_AUJOURDHUI} : {e}")
-            return
-
-        date_plan = extraire_date_plan(page_html)
-        entrees = extraire_entrees_entfall(page_html, date_plan)
-        print(f"7h — {len(entrees)} entrée(s) 'Entfall' trouvée(s) pour {CLASSE_CIBLE} ({date_plan}).")
-
-        if entrees:
-            corps = formater_entrees(entrees, date_plan, URL_AUJOURDHUI)
-            envoyer_email(f"Vertretungsplan Klasse {CLASSE_CIBLE} — Entfall heute ({date_plan})", corps)
-            print("Email envoyé (matin).")
-
-        etat["date_cible"] = date_plan
-        etat["signaled"] = [e["cle"] for e in entrees]
-        etat["dernier_envoi_matin"] = aujourdhui
-        ecrire_etat(etat)
-        return
-
-    # --- 08h00 à 15h29 : vérification des nouveautés uniquement ---
-    if (8 <= heure < 15) or (heure == 15 and minute < 30):
-        try:
-            page_html = recuperer_page(URL_AUJOURDHUI)
-        except Exception as e:
-            print(f"[ERREUR] Impossible de récupérer {URL_AUJOURDHUI} : {e}")
-            return
-
-        date_plan = extraire_date_plan(page_html)
-        entrees = extraire_entrees_entfall(page_html, date_plan)
-        deja_signalees = set(etat.get("signaled", []))
-        nouvelles = [e for e in entrees if e["cle"] not in deja_signalees]
-
-        if nouvelles:
-            corps = formater_entrees(nouvelles, date_plan, URL_AUJOURDHUI)
-            envoyer_email(f"Vertretungsplan Klasse {CLASSE_CIBLE} — neuer Entfall ({date_plan})", corps)
-            print(f"Journée — {len(nouvelles)} nouvelle(s) entrée(s), email envoyé.")
-        else:
-            print("Journée — aucune nouvelle entrée.")
-
-        etat["date_cible"] = date_plan
-        etat["signaled"] = list(deja_signalees | {e["cle"] for e in entrees})
-        ecrire_etat(etat)
-        return
-
-    print(f"{heure}h{minute:02d} — hors des plages surveillées, rien à faire.")
+    # --- Sauvegarde de l'état (dans tous les cas, même sans nouveauté) ---
+    etat["signaled"] = signaled
+    ecrire_etat(etat)
 
 
 if __name__ == "__main__":
