@@ -1,23 +1,29 @@
 name: Alerte Vertretungsplan 5d
 
 on:
-  # Aucun déclenchement automatique côté GitHub : c'est crontab.org qui
-  # appelle ce workflow via l'API GitHub, en indiquant le mode d'exécution
-  # dans client_payload.mode (voir les instructions données à côté).
-  repository_dispatch:
-    types: [verifier-plan]
+  # Aucun déclenchement automatique côté GitHub. Le planificateur externe
+  # (cron-job.org) appelle ce workflow via l'API workflow_dispatch, DE LA
+  # MÊME FAÇON à tout moment (un seul cronjob, body {"ref":"main"}, sans
+  # paramètre) : c'est le script Python qui détecte l'heure d'exécution
+  # (heure de Berlin) et choisit lui-même le mode adéquat.
   workflow_dispatch:
-    # Pour pouvoir tester manuellement depuis l'interface GitHub, avec un
-    # mode choisi dans une liste.
     inputs:
       mode:
-        description: "Mode d'exécution"
+        description: "Mode d'exécution ('auto' = détection horaire par le script)"
         required: true
         type: choice
+        default: auto
         options:
+          - auto
           - soir
           - matin
           - journee
+
+# Un seul run à la fois : évite que deux appels proches écrivent le fichier
+# d'état en même temps.
+concurrency:
+  group: vertretungsplan-5d
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -42,7 +48,10 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
-          MODE: ${{ github.event.client_payload.mode || github.event.inputs.mode }}
+          # Vide quand cron-job.org appelle sans inputs -> le script
+          # détecte l'heure lui-même. Renseigné seulement pour les tests
+          # manuels depuis l'interface GitHub.
+          MODE: ${{ github.event.inputs.mode }}
         run: python alerte_vertretung_5d.py
 
       - name: Sauvegarder l'état
