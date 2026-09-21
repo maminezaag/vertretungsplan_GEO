@@ -1,8 +1,11 @@
 name: Alerte Vertretungsplan 5d
 
 on:
-  schedule:
-    - cron: '*/10 5-19 * * *'
+  # Aucun déclenchement automatique côté GitHub : c'est crontab.org qui
+  # appelle ce workflow via l'API GitHub (voir plus bas comment configurer
+  # la tâche cron sur crontab.org).
+  repository_dispatch:
+    types: [verifier-plan]
   workflow_dispatch:
 
 permissions:
@@ -37,4 +40,3 @@ jobs:
           git add -A -- etat_vertretung_5d.json || true
           git diff --staged --quiet || git commit -m "Mise à jour état Vertretungsplan 5d"
           git push
-
