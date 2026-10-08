@@ -46,6 +46,15 @@ Fonctionnement :
   - Nettoyage automatique : à chaque exécution, les entrées d'état
     antérieures à aujourd'hui sont supprimées (on ne garde que
     "aujourd'hui" et "demain").
+
+  - Garde-fou "page pas encore à jour" : avant d'envoyer quoi que ce soit,
+    le script compare la date RÉELLEMENT affichée sur la page (ex. "6.10.2026
+    Dienstag") à la date ATTENDUE pour ce passage (aujourd'hui pour
+    matin/journee, demain pour soir). Si la page est encore datée d'un jour
+    antérieur (pas encore republiée par l'école), le script n'envoie AUCUN
+    email et ne marque rien comme "fait" — il réessaiera au prochain appel,
+    plutôt que de signaler une information périmée comme si elle était
+    à jour.
 """
 
 import os
@@ -55,7 +64,7 @@ import smtplib
 from email.mime.text import MIMEText
 from html import unescape
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -129,6 +138,20 @@ def extraire_date_plan(page_html: str) -> str:
     return m.group(0) if m else "date inconnue"
 
 
+def parser_date_plan(date_plan: str):
+    """Convertit une date du type '6.10.2026 Dienstag' (jour.mois.année, à
+    l'allemande) en objet `date` Python. Renvoie None si le format ne
+    correspond pas à ce qui est attendu (ex. 'date inconnue')."""
+    m = re.match(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", date_plan)
+    if not m:
+        return None
+    jour, mois, annee = (int(x) for x in m.groups())
+    try:
+        return date(annee, mois, jour)
+    except ValueError:
+        return None
+
+
 def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASSE_CIBLE):
     """Renvoie la liste des entrées 'Entfall' pour la classe donnée.
 
@@ -171,7 +194,20 @@ def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASS
             }
         )
 
-    return entrees
+    # Déduplication : une entrée concernant plusieurs classes à la fois (ex.
+    # "5a, 5b, 5c, 5d, 5e") est listée UNE FOIS PAR CLASSE sur la page (une
+    # ligne identique sous chaque section de classe concernée). Comme la
+    # classe recherchée apparaît dans chacune de ces lignes, on la retrouve
+    # plusieurs fois avec exactement la même clé — on ne garde que la
+    # première occurrence de chaque clé.
+    vues = set()
+    entrees_uniques = []
+    for e in entrees:
+        if e["cle"] not in vues:
+            vues.add(e["cle"])
+            entrees_uniques.append(e)
+
+    return entrees_uniques
 
 
 # --- État persistant ---------------------------------------------------------
@@ -248,8 +284,10 @@ def traiter_page(url: str, date_iso: str, signaled: dict, libelle_sujet: str, fo
     Valeur de retour :
       - True  : email envoyé
       - False : page lue avec succès mais rien à envoyer
-      - None  : échec de la récupération de la page (on réessaiera au
-                prochain appel du planificateur)
+      - None  : échec de la récupération de la page, OU page pas encore à
+                jour (contenu daté d'un jour antérieur à `date_iso`) — dans
+                les deux cas on réessaiera au prochain appel du
+                planificateur, sans rien envoyer ni marquer comme "fait".
     """
     try:
         page_html = recuperer_page(url)
@@ -258,6 +296,21 @@ def traiter_page(url: str, date_iso: str, signaled: dict, libelle_sujet: str, fo
         return None
 
     date_plan = extraire_date_plan(page_html)
+
+    # --- Garde-fou : la page doit correspondre au jour attendu ---
+    # L'école ne republie pas forcément la page exactement à l'heure prévue ;
+    # si le contenu est encore celui d'un jour antérieur, on ne doit RIEN
+    # envoyer (ce serait une information périmée présentée comme à jour).
+    date_attendue = date.fromisoformat(date_iso)
+    date_reelle = parser_date_plan(date_plan)
+    if date_reelle is None or date_reelle != date_attendue:
+        print(
+            f"[ATTENTION] Page pas encore à jour pour {url.rsplit('/', 1)[-1]} : "
+            f"contenu daté '{date_plan}' au lieu du {date_attendue.isoformat()} attendu "
+            "— aucun email envoyé, nouvelle tentative au prochain appel."
+        )
+        return None
+
     entrees = extraire_entrees_entfall(page_html, date_plan)
     deja_signalees = set(signaled.get(date_iso, []))
 
