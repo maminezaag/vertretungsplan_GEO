@@ -1,7 +1,9 @@
 {
   "last_full_report": {
     "soir": "2026-10-08",
-    "matin": "2026-10-09"
+    "matin": "2026-10-26"
   },
-  "signaled": {}
+  "signaled": {
+    "2026-10-26": []
+  }
 }
