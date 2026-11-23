@@ -3,29 +3,32 @@ Surveillance du plan de remplacement (Vertretungsplan) du Gymnasium Eversten
 pour la classe 5d — alerte par email en cas d'heure "Entfall" (cours annulé).
 
 Fonctionnement :
-  - Le planificateur externe (cron-job.org) appelle TOUJOURS le même lien,
-    de la même façon (un seul cronjob par heure prévue, aucun paramètre de
-    mode dans le corps de la requête). C'est LE SCRIPT, côté GitHub, qui
-    détecte l'heure d'exécution (heure de Berlin) et choisit lui-même le
-    mode adéquat.
+  - Deux jobs cron-job.org appellent le MÊME lien GitHub (POST avec
+    {"ref":"main"}), sans paramètre de mode :
+      * 0 7-12 * * 1-5    : lundi-vendredi à 07, 08, 09, 10, 11 et 12 h
+      * 0 19 * * 0-4     : dimanche-jeudi à 19 h
+    Le script choisit le mode d'après la date et l'heure de Berlin.
+    Il refuse les déclenchements automatiques hors de ces jours/plages.
 
   - Pour éviter qu'un léger retard de cron-job.org (quelques minutes, voire
     plus) ne fasse "sauter" un rapport complet, la détection ne se base PAS
     sur des heures exactes mais sur des fenêtres larges + une garde
     "déjà fait aujourd'hui", par ordre de priorité à chaque appel :
 
-        1) Si l'heure est dans la fenêtre du SOIR (19h–22h) ET que le
+        1) Du dimanche au jeudi, si l'heure est dans la fenêtre du SOIR
+           (19h–22h, tolérance pour les retards) ET que le
            rapport "soir" n'a pas encore été envoyé aujourd'hui
            → mode "soir" : lit la page de DEMAIN (subst_002.htm) et
              envoie TOUJOURS un email complet.
 
-        2) Sinon, si l'heure est dans la fenêtre du MATIN (6h–12h) ET que
+        2) Sinon, du lundi au vendredi, si l'heure est dans la fenêtre
+           du MATIN (7h–12h) ET que
            le rapport "matin" n'a pas encore été envoyé aujourd'hui
            → mode "matin" : lit la page d'AUJOURD'HUI (subst_001.htm) et
              envoie TOUJOURS un email complet (même contenu que celui de
              la veille au soir si rien n'a changé — pas grave, voulu).
 
-        3) Sinon, si l'heure est dans la fenêtre de la JOURNÉE (8h–13h)
+        3) Sinon, du lundi au vendredi, de 8h à 12h,
            → mode "journee" : relit la page d'AUJOURD'HUI et envoie un
              email UNIQUEMENT si une entrée nouvelle (absente de la
              baseline laissée par le rapport du matin) est détectée.
@@ -33,7 +36,7 @@ Fonctionnement :
         4) Sinon → rien à faire, le script s'arrête proprement.
 
     Grâce à la garde "pas encore fait aujourd'hui" combinée à des fenêtres
-    larges, le PREMIER appel du jour qui tombe entre 6h et 12h devient
+    larges, le PREMIER appel du jour qui tombe entre 7h et 12h devient
     automatiquement le rapport "matin" — même s'il arrive en retard (ex. à
     8h05 au lieu de 7h00 pile). Les appels suivants dans cette même plage
     redeviennent alors des vérifications différentielles ("journee").
@@ -42,6 +45,9 @@ Fonctionnement :
     (soir/matin/journee) — utile pour les tests manuels via
     workflow_dispatch. Vide ou "auto" = détection automatique décrite
     ci-dessus.
+
+  - Les annulations concernant exclusivement la 7e heure ou les suivantes
+    sont ignorées (la classe termine au plus tard après la 6e heure).
 
   - Nettoyage automatique : à chaque exécution, les entrées d'état
     antérieures à aujourd'hui sont supprimées (on ne garde que
@@ -81,9 +87,10 @@ ART_CIBLE = "entfall"  # comparaison insensible à la casse
 # que le planning réel de cron-job.org : elles servent de filet de
 # sécurité en cas de retard d'appel, pas de découpage strict. La garde
 # "déjà envoyé aujourd'hui" (voir detecter_mode) évite les doublons.
-SOIR_HEURES = range(19, 23)     # 19h–22h : fenêtre du rapport complet "demain"
-MATIN_HEURES = range(6, 13)     # 6h–12h  : fenêtre du rapport complet "aujourd'hui"
-JOURNEE_HEURES = range(8, 14)   # 8h–13h  : fenêtre des vérifications différentielles
+SOIR_HEURES = range(19, 23)     # 19h–22h : tolérance si l'appel de 19h est en retard
+MATIN_HEURES = range(7, 13)     # 07h–12h : 1er passage = rapport complet
+JOURNEE_HEURES = range(8, 13)   # 08h–12h : passages suivants = nouveautés seulement
+MAX_STUNDE = 6                 # Ne jamais annoncer une annulation à partir de la 7e heure
 
 MODES_VALABLES = {"soir", "matin", "journee"}
 
@@ -152,6 +159,33 @@ def parser_date_plan(date_plan: str):
         return None
 
 
+def limiter_stunden(stunde_brute: str) -> str | None:
+    """Ne conserve que les heures 1 à 6.
+
+    Accepte par exemple "6", "6.", "7", "7-8", "5-7" ou "5./6.".
+    Une plage à cheval sur la limite, comme "5-7", devient "5-6" pour
+    ne jamais afficher ou signaler la 7e heure.
+    """
+    valeur = re.sub(r"\s+", "", stunde_brute)
+    if not valeur:
+        return None
+
+    plage = re.fullmatch(r"(\d{1,2})\.?[-–—](\d{1,2})\.?", valeur)
+    if plage:
+        premiere, derniere = map(int, plage.groups())
+        if premiere < 1 or derniere < premiere or premiere > MAX_STUNDE:
+            return None
+        derniere = min(derniere, MAX_STUNDE)
+        return str(premiere) if premiere == derniere else f"{premiere}-{derniere}"
+
+    # Numéros isolés, ou énumérations comme "5./6." ou "6/7".
+    nombres = [int(n) for n in re.findall(r"\d+", valeur)]
+    pertinents = list(dict.fromkeys(n for n in nombres if 1 <= n <= MAX_STUNDE))
+    if not pertinents:
+        return None
+    return "/".join(map(str, pertinents))
+
+
 def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASSE_CIBLE):
     """Renvoie la liste des entrées 'Entfall' pour la classe donnée.
 
@@ -179,6 +213,12 @@ def extraire_entrees_entfall(page_html: str, date_plan: str, classe: str = CLASS
         if classe not in classes_ligne:
             continue
         if art.strip().lower() != ART_CIBLE:
+            continue
+
+        # L'enfant quitte l'école après la 6e heure : exclure 7, 8, etc.
+        # Le filtrage précède la déduplication, la sauvegarde et l'email.
+        stunde = limiter_stunden(stunde)
+        if stunde is None:
             continue
 
         fach = fach_old or fach_new
@@ -345,29 +385,31 @@ def traiter_page(url: str, date_iso: str, signaled: dict, libelle_sujet: str, fo
 
 # --- Détection automatique du mode -------------------------------------------
 
-def detecter_mode(heure_berlin: int, etat: dict, today_iso: str):
-    """Détermine le mode à exécuter, par ordre de priorité :
+def detecter_mode(maintenant: datetime, etat: dict, today_iso: str):
+    """Contrôle le jour ET l'heure de Berlin avant de choisir un mode.
 
-        1) soir    — si l'heure est dans SOIR_HEURES ET pas encore fait aujourd'hui
-        2) matin   — si l'heure est dans MATIN_HEURES ET pas encore fait aujourd'hui
-        3) journee — si l'heure est dans JOURNEE_HEURES
-        4) None    — sinon (rien à faire)
+    Dimanche : soir seulement (19h, avec tolérance pour un appel en retard).
+    Lundi-jeudi : rapport matinal à 07h puis nouveautés 08h-12h, soir à 19h.
+    Vendredi : rapport matinal à 07h puis nouveautés 08h-12h, aucun soir.
+    Samedi : aucun lancement automatique.
 
-    C'est cette priorité + les fenêtres larges qui rendent la détection
-    robuste à un appel en retard : le premier appel de la matinée devient
-    "matin" même s'il tombe après 8h, tant que "matin" n'a pas déjà été
-    fait aujourd'hui.
+    Les modes imposés manuellement restent disponibles pour les tests.
     """
+    heure_berlin = maintenant.hour
+    jour = maintenant.weekday()  # lundi=0 ... vendredi=4, samedi=5, dimanche=6
     dernier_rapport = etat.get("last_full_report", {})
 
-    if heure_berlin in SOIR_HEURES and dernier_rapport.get("soir") != today_iso:
-        return "soir"
+    # Soir du dimanche au jeudi uniquement (pas de vendredi ni samedi).
+    if (jour == 6 or 0 <= jour <= 3) and heure_berlin in SOIR_HEURES:
+        if dernier_rapport.get("soir") != today_iso:
+            return "soir"
 
-    if heure_berlin in MATIN_HEURES and dernier_rapport.get("matin") != today_iso:
-        return "matin"
-
-    if heure_berlin in JOURNEE_HEURES:
-        return "journee"
+    # Matin et contrôles de journée du lundi au vendredi uniquement.
+    if 0 <= jour <= 4:
+        if heure_berlin in MATIN_HEURES and dernier_rapport.get("matin") != today_iso:
+            return "matin"
+        if heure_berlin in JOURNEE_HEURES:
+            return "journee"
 
     return None
 
@@ -397,7 +439,7 @@ def main():
     # 2) sinon : détection automatique selon l'heure d'exécution à Berlin.
     mode = os.environ.get("MODE", "").strip().lower()
     if mode in ("", "auto"):
-        mode = detecter_mode(maintenant.hour, etat, today_iso)
+        mode = detecter_mode(maintenant, etat, today_iso)
         if mode is None:
             print(f"{maintenant:%H:%M} (heure de Berlin) : hors fenêtre horaire — aucune action.")
             return
